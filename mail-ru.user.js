@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mail.ru — убрать рекламу на главной
 // @namespace    local.mailru.cleanup
-// @version      1.8.0
+// @version      1.9.0
 // @description  Оставляет на главной Mail.ru почту, поиск и верхнее меню. Скрывает рекламные блоки веб-почты.
 // @match        https://mail.ru/*
 // @match        https://www.mail.ru/*
@@ -27,7 +27,7 @@
     // These rules match the slot even while it is empty and even when the creative's
     // children are opaque. They apply on both the inbox and separate read-letter URLs.
     const pane = ':is([data-qa-id="letter-content"],.application-mail__letter-content)';
-    const nativeSlot = ':is([data-qa-id="native-adv"],.letter-list-item-adv,.letter-list-item-adv_topline,[data-qa-is-topline="1"][data-qa-placement-name])';
+    const nativeSlot = ':is([data-qa-id="native-adv"],.letter-list-item-adv,.letter-list-item-adv_topline,.spec-project-letter,[data-qa-is-topline="1"][data-qa-placement-name])';
     const menu = ':is(.new-menu.content-header,[class~="content-header"])';
     const nextToMenu = ':has(+ ' + menu + ', + :is(div,section) > ' + menu + ')';
     const guard = ':not(:is(header,nav,form,dialog,[role="toolbar"],[role="dialog"],[role="alert"],[role="status"],.content-header))' +
@@ -39,17 +39,61 @@
       pane + ' > :is(div,section):has(> ' + nativeSlot + ')' + nextToMenu + guard
     ].join(',\n');
     const safeSelectors = adSlots.map(slot => slot + ':not(' + protectedAreas + ', ' + protectedAreas + ' *):not(:has(' + protectedAreas + '))');
-    const slotCSS = [fixedSlots, ...safeSelectors].join(',\n') + ' { display:none !important; }';
+    const attr = 'data-mailru-top-banner';
+    const slotCSS = [fixedSlots, ...safeSelectors, '[' + attr + ']'].join(',\n') + ' { display:none !important; }';
     // Constructed CSS survives re-creation of <head> by the app.
     try {
       const sheet = new CSSStyleSheet();
       sheet.replaceSync(slotCSS);
       document.adoptedStyleSheets = [...document.adoptedStyleSheets,sheet];
     } catch { GM_addStyle(slotCSS); }
-    // Mail sometimes inserts an unmarked horizontal card above the message toolbar.
+    // Mail's locator rewrites the selectors of its own stylesheet. The painted ad row
+    // retains this combination of declarations in the desktop portal's bundle.
+    const rowColor = 'var(--vkui--octavius_color_list_letter_adv_background)';
+    const mappedSlots = new Set();
+    const inspected = new WeakMap();
+    const rootClasses = new Set(['.letter-list-item-adv','.spec-project-letter']);
+    let detectedSlots = fixedSlots, mappedSheet;
+    let nextSheetCheck = 0;
+    function refreshSlotNames() {
+      mappedSlots.clear();
+      for (const sheet of [...document.styleSheets, ...document.adoptedStyleSheets]) {
+        if (sheet.disabled || sheet.ownerNode?.closest(protectedAreas)) continue;
+        let rules;
+        try { rules = sheet.cssRules; } catch { continue; }
+        const cached = inspected.get(sheet);
+        if (cached && cached.count === rules.length) {
+          for (const name of cached.names) mappedSlots.add(name);
+          continue;
+        }
+        const names = new Set();
+        for (const rule of rules) {
+          const style = rule.style;
+          if (!rule.selectorText || !style) continue;
+          const selectors = rule.selectorText.split(',').map(s => s.trim());
+          const isAdRow = style.backgroundColor === rowColor && style.overflow === 'hidden' &&
+            style.position === 'relative' && /^translateZ\(0(?:px)?\)$/i.test(style.transform) &&
+            style.userSelect === 'none';
+          if (!isAdRow && !selectors.some(s => rootClasses.has(s))) continue;
+          for (const name of selectors) if (/^\.[\w-]+$/.test(name) && !rootClasses.has(name)) names.add(name);
+        }
+        inspected.set(sheet,{count:rules.length,names});
+        for (const name of names) mappedSlots.add(name);
+      }
+      const alias = mappedSlots.size ? ':is(' + [...mappedSlots].join(',') + ')' + guard : '';
+      const selectors = alias ? fixedSlots + ',' + alias : fixedSlots;
+      if (selectors !== detectedSlots) {
+        detectedSlots = selectors;
+        try {
+          if (!mappedSheet) {
+            mappedSheet = new CSSStyleSheet();
+            document.adoptedStyleSheets = [...document.adoptedStyleSheets,mappedSheet];
+          }
+          mappedSheet.replaceSync(alias ? alias + ' {display:none !important}' : '');
+        } catch { /* The DOM pass applies the same selectors. */ }
+      }
+    }
     const marker = /р[еe]кл[аa]м[аa][\s\u200b·|•]*\d{1,2}\s*\+/iu;
-    const attr = 'data-mailru-top-banner';
-    GM_addStyle('[' + attr + '] { display:none !important; }');
     const hiddenBanners = new Map();
     function readingLetter() {
       return new URLSearchParams(location.search).get('open-multipage-name') === 'read-letter' ||
@@ -57,10 +101,11 @@
     }
     function hide(el, reason) {
       if (!hiddenBanners.has(el)) hiddenBanners.set(el, {
-        value: el.style.display, priority: el.style.getPropertyPriority('display'), url:location.href
+        value: el.style.display, priority: el.style.getPropertyPriority('display'), url:location.href, reason
       });
-      el.setAttribute(attr, reason);
-      el.style.setProperty('display','none','important');
+      if (el.getAttribute(attr) !== reason) el.setAttribute(attr, reason);
+      if (el.style.display !== 'none' || el.style.getPropertyPriority('display') !== 'important')
+        el.style.setProperty('display','none','important');
     }
     function restore(el, saved) {
       el.removeAttribute(attr);
@@ -96,6 +141,9 @@
       return [el.getAttribute('aria-label'), el.title, el.textContent?.trim()].filter(Boolean);
     }
     function toolbarAction() {
+      for (const el of document.querySelectorAll(menu)) {
+        if (!el.closest(protectedAreas) && el.getBoundingClientRect().height > 0) return el;
+      }
       const controls = [...document.querySelectorAll('button,a,[role="button"],[title],[aria-label],span,div:not(:has(> *))')];
       const actions = controls.filter(el => !el.closest(protectedAreas) &&
         caption(el).some(s => /^(Удалить|В архив|Ответить|Переслать)(?: письмо)?$/i.test(s)) &&
@@ -104,19 +152,62 @@
         caption(other)[0] !== caption(el)[0] &&
         Math.abs(other.getBoundingClientRect().top - el.getBoundingClientRect().top) < 18));
     }
+    function adLabel(el) {
+      const roots = [el];
+      if (el.shadowRoot) roots.push(el.shadowRoot);
+      for (const host of el.querySelectorAll('*')) if (host.shadowRoot) roots.push(host.shadowRoot);
+      return roots.some(root => marker.test(root.textContent) ||
+        [...root.querySelectorAll('[aria-label],[title],img[alt]')].some(item =>
+          [item.getAttribute('aria-label'),item.title,item.getAttribute('alt')].some(s => s && marker.test(s))));
+    }
+    // Sample only the top of the reading pane. This also finds a label inside an open
+    // shadow root without walking the message tree or relying on translated toolbar text.
+    function labelledTopCard(row) {
+      const header = document.querySelector('#headline')?.getBoundingClientRect();
+      const cssTop = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--headline-height'));
+      const top = header?.height > 0 ? header.bottom : (cssTop || 62);
+      const boundary = row?.getBoundingClientRect().top;
+      for (const x of [.50,.75,.91].map(f => Math.floor(innerWidth*f))) {
+        for (const offset of [24,58,86]) {
+          let best;
+          for (let el = document.elementFromPoint(x,top + offset); el && el !== document.body; el = el.parentElement) {
+            const box = el.getBoundingClientRect();
+            if (box.height > 210 || el.closest(excluded) || (row && el.contains(row))) break;
+            if (box.top < top - 6 || box.top > top + 36 || box.height < 40 ||
+                box.width < Math.max(270,innerWidth*.35) || box.width < box.height*2.5 ||
+                (boundary != null && box.bottom > boundary+3)) continue;
+            if (el.querySelector(excluded + ',input,textarea')) break;
+            if (best || adLabel(el)) best = el;
+          }
+          if (best) return best;
+        }
+      }
+    }
     function update() {
       if (!document.body) return;
-      const row = readingLetter() ? toolbarAction() : null;
+      if (performance.now() >= nextSheetCheck) {
+        refreshSlotNames();
+        nextSheetCheck = performance.now() + 2500;
+      }
+      const reading = readingLetter();
+      const row = reading ? toolbarAction() : null;
       const boundary = row?.getBoundingClientRect().top;
       for (const [el,saved] of hiddenBanners) {
         if (!el.isConnected || saved.url !== location.href || el.querySelector(protectedAreas) ||
-            (el.getAttribute(attr) === 'native' && !el.matches(fixedSlots)) ||
-            (row && el.contains(row)) || (el.getAttribute(attr) === 'label' && !marker.test(el.textContent))) restore(el,saved);
+            el.closest(excluded) || el.querySelector(excluded + ',input,textarea') ||
+            (saved.reason === 'native' && !el.matches(detectedSlots)) ||
+            (row && el.contains(row)) || (saved.reason === 'label' && !marker.test(el.textContent)) ||
+            (saved.reason === 'top-label' && !adLabel(el))) restore(el,saved);
+        else hide(el,saved.reason);
       }
       // Outrank a late inline display:... !important on a known slot. Keep this
       // separate from toolbar recognition: toolbar text can load after the ad.
-      for (const el of document.querySelectorAll(fixedSlots)) {
+      for (const el of document.querySelectorAll(detectedSlots)) {
         if (getComputedStyle(el).display !== 'none') hide(el,'native');
+      }
+      if (reading) {
+        const card = labelledTopCard(row);
+        if (card) hide(card,'top-label');
       }
       if (!row) return;
       // Some creatives are rendered inside a frame or a separate component.
@@ -149,7 +240,17 @@
       if (timer) return;
       timer = requestAnimationFrame(() => { timer = 0; update(); });
     }
-    new MutationObserver(schedule).observe(document, {subtree:true, childList:true, characterData:true,
+    const styles = 'style,link[rel="stylesheet"]';
+    new MutationObserver(records => {
+      for (const record of records) {
+        const owner = record.target.nodeType === Node.TEXT_NODE ? record.target.parentElement : record.target;
+        if (owner?.matches?.(styles)) {
+          if (owner.sheet) inspected.delete(owner.sheet);
+          nextSheetCheck = 0;
+        } else if ([...record.addedNodes,...record.removedNodes].some(el => el.matches?.(styles))) nextSheetCheck = 0;
+      }
+      schedule();
+    }).observe(document, {subtree:true, childList:true, characterData:true,
       attributes:true, attributeFilter:['class','style','aria-label','title','data-qa-id','data-qa-is-topline','data-qa-placement-name']});
     window.addEventListener('pageshow',schedule);
     window.addEventListener('resize', schedule);
@@ -271,7 +372,7 @@
     new MutationObserver(scheduleHome).observe(document, {subtree:true,childList:true,attributes:true,attributeFilter:['class','id','slot','style','role','open']});
     scheduleHome();
     if (typeof GM_registerMenuCommand === 'function') GM_registerMenuCommand('Проверить очистку главной', () =>
-      window.alert('Mail.ru · версия 1.8.0\n' + status + ' Скрытых блоков: ' + hidden.size));
+      window.alert('Mail.ru · версия 1.9.0\n' + status + ' Скрытых блоков: ' + hidden.size));
     return;
   }
   const slots = [

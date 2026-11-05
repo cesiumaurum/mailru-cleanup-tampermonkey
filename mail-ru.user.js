@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mail.ru — убрать рекламу на главной
 // @namespace    local.mailru.cleanup
-// @version      1.9.0
+// @version      1.9.1
 // @description  Оставляет на главной Mail.ru почту, поиск и верхнее меню. Скрывает рекламные блоки веб-почты.
 // @match        https://mail.ru/*
 // @match        https://www.mail.ru/*
@@ -113,6 +113,19 @@
       hiddenBanners.delete(el);
     }
     const excluded = protectedAreas + ',nav,header,form,[role="toolbar"],[role="alert"],[role="status"],[role="dialog"],[role="menu"]';
+    // The portal's anti-adblock notice has a random ID in both light and dark themes.
+    // Match its own controls, exact captions and fixed bottom placement; never a mail body.
+    function isAdblockPrompt(el) {
+      if (!el?.matches('div:has(> .iconWrapper > .icon):has(> .closeWrapper > .close)') ||
+          el.closest(protectedAreas + ',nav,header,form,dialog,[role="toolbar"],[role="dialog"],[role="menu"]') ||
+          el.querySelector(excluded + ',input,textarea')) return false;
+      const title = el.querySelector(':scope > div > .title');
+      const help = el.querySelector(':scope > .buttonWrapper > .button-help');
+      if (title?.textContent.trim() !== 'Кажется, возникла проблема из-за блокировщика рекламы' ||
+          help?.textContent.trim() !== 'Добавить в исключения') return false;
+      const style = getComputedStyle(el);
+      return style.position === 'fixed' && style.bottom !== 'auto';
+    }
     function horizontalCard(start, row, manual = false) {
       const anchor = row?.getBoundingClientRect();
       let best = null;
@@ -193,12 +206,17 @@
       const row = reading ? toolbarAction() : null;
       const boundary = row?.getBoundingClientRect().top;
       for (const [el,saved] of hiddenBanners) {
-        if (!el.isConnected || saved.url !== location.href || el.querySelector(protectedAreas) ||
+        if (!el.isConnected || saved.url !== location.href ||
+            (saved.reason === 'adblock-prompt' ? !isAdblockPrompt(el) : el.querySelector(protectedAreas) ||
             el.closest(excluded) || el.querySelector(excluded + ',input,textarea') ||
             (saved.reason === 'native' && !el.matches(detectedSlots)) ||
             (row && el.contains(row)) || (saved.reason === 'label' && !marker.test(el.textContent)) ||
-            (saved.reason === 'top-label' && !adLabel(el))) restore(el,saved);
+            (saved.reason === 'top-label' && !adLabel(el)))) restore(el,saved);
         else hide(el,saved.reason);
+      }
+      for (const help of document.querySelectorAll('.buttonWrapper > .button-help')) {
+        const prompt = help.parentElement.parentElement;
+        if (isAdblockPrompt(prompt)) hide(prompt,'adblock-prompt');
       }
       // Outrank a late inline display:... !important on a known slot. Keep this
       // separate from toolbar recognition: toolbar text can load after the ad.
@@ -372,7 +390,7 @@
     new MutationObserver(scheduleHome).observe(document, {subtree:true,childList:true,attributes:true,attributeFilter:['class','id','slot','style','role','open']});
     scheduleHome();
     if (typeof GM_registerMenuCommand === 'function') GM_registerMenuCommand('Проверить очистку главной', () =>
-      window.alert('Mail.ru · версия 1.9.0\n' + status + ' Скрытых блоков: ' + hidden.size));
+      window.alert('Mail.ru · версия 1.9.1\n' + status + ' Скрытых блоков: ' + hidden.size));
     return;
   }
   const slots = [

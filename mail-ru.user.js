@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mail.ru — убрать рекламу на главной
 // @namespace    local.mailru.cleanup
-// @version      1.9.1
+// @version      1.9.2
 // @description  Оставляет на главной Mail.ru почту, поиск и верхнее меню. Скрывает рекламные блоки веб-почты.
 // @match        https://mail.ru/*
 // @match        https://www.mail.ru/*
@@ -126,6 +126,61 @@
       const style = getComputedStyle(el);
       return style.position === 'fixed' && style.bottom !== 'auto';
     }
+    // Dismiss this advertised Cloud campaign through Mail's own close control.
+    // The app then removes its backdrop, focus trap and scroll lock together.
+    const promoCloseAttempts = new Map();
+    const promoText = el => el.textContent.replace(/\s+/gu,' ').trim();
+    function dismissCloudPromo() {
+      const candidates = new Set();
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT, {
+        acceptNode(el) {
+          if (el.matches(protectedAreas + ',script,style,template,textarea,input,nav,header,form'))
+            return NodeFilter.FILTER_REJECT;
+          return el.textContent.length < 100 && promoText(el) === 'Ого! Как выгодно!' ?
+            NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
+        }
+      });
+      for (let title; (title = walker.nextNode());) {
+        for (let panel = title.parentElement; panel && panel !== document.body; panel = panel.parentElement) {
+          if (panel.closest(protectedAreas + ',form') || panel.querySelector(protectedAreas + ',form,input,textarea')) break;
+          const box = panel.getBoundingClientRect();
+          if (box.width > Math.min(950,innerWidth) || box.height > innerHeight + 40) break;
+          if (box.width < 250 || box.height < 150) continue;
+          const text = promoText(panel);
+          if (!/Подключите 1 терабайт памяти в Облако/u.test(text) ||
+              !text.includes('Попробовать Облако') || !/Реклама\./u.test(text) || !/\berid\s*:/iu.test(text)) continue;
+          let modal = false;
+          for (let parent = panel; parent && parent !== document.body; parent = parent.parentElement) {
+            if (parent.matches('dialog[open],[role="dialog"],[aria-modal="true"]') ||
+                getComputedStyle(parent).position === 'fixed') { modal = true; break; }
+          }
+          if (!modal) continue;
+          for (const close of panel.querySelectorAll('[data-test-id="cross"],button,[role="button"],[aria-label],[title]')) {
+            if (!(close instanceof HTMLElement) || close.closest('a,form') || close.hasAttribute('disabled') ||
+                close.getAttribute('aria-disabled') === 'true') continue;
+            const namedClose = caption(close).some(s => /^(?:Закрыть(?: окно)?|Close(?: dialog)?)$/iu.test(s));
+            if (!close.matches('[data-test-id="cross"]') && !namedClose) continue;
+            const rect = close.getBoundingClientRect(), style = getComputedStyle(close);
+            if (rect.width < 8 || rect.width > 80 || rect.height < 8 || rect.height > 80 ||
+                rect.left < box.right - 100 || rect.right > box.right + 12 ||
+                rect.top < box.top - 12 || rect.bottom > box.top + 100 ||
+                style.visibility !== 'visible' || style.pointerEvents === 'none') continue;
+            // Do not dismiss a background panel underneath a different active dialog.
+            const top = document.elementFromPoint(rect.left + rect.width / 2,rect.top + rect.height / 2);
+            if (top && close.contains(top)) candidates.add(close);
+          }
+        }
+      }
+      for (const close of promoCloseAttempts.keys()) if (!candidates.has(close)) promoCloseAttempts.delete(close);
+      for (const close of candidates) {
+        const saved = promoCloseAttempts.get(close), now = performance.now();
+        // A delayed event binding can need a retry. Bound retries avoid an event loop.
+        if (saved && (saved.count >= 3 || now - saved.time < 1000)) continue;
+        promoCloseAttempts.set(close,{count:(saved?.count || 0) + 1,time:now});
+        close.click();
+        break;
+      }
+    }
     function horizontalCard(start, row, manual = false) {
       const anchor = row?.getBoundingClientRect();
       let best = null;
@@ -198,6 +253,7 @@
     }
     function update() {
       if (!document.body) return;
+      dismissCloudPromo();
       if (performance.now() >= nextSheetCheck) {
         refreshSlotNames();
         nextSheetCheck = performance.now() + 2500;
@@ -269,7 +325,7 @@
       }
       schedule();
     }).observe(document, {subtree:true, childList:true, characterData:true,
-      attributes:true, attributeFilter:['class','style','aria-label','title','data-qa-id','data-qa-is-topline','data-qa-placement-name']});
+      attributes:true, attributeFilter:['class','style','hidden','open','aria-hidden','aria-label','title','data-test-id','data-qa-id','data-qa-is-topline','data-qa-placement-name']});
     window.addEventListener('pageshow',schedule);
     window.addEventListener('resize', schedule);
     document.addEventListener('load', schedule, true);
@@ -390,7 +446,7 @@
     new MutationObserver(scheduleHome).observe(document, {subtree:true,childList:true,attributes:true,attributeFilter:['class','id','slot','style','role','open']});
     scheduleHome();
     if (typeof GM_registerMenuCommand === 'function') GM_registerMenuCommand('Проверить очистку главной', () =>
-      window.alert('Mail.ru · версия 1.9.1\n' + status + ' Скрытых блоков: ' + hidden.size));
+      window.alert('Mail.ru · версия 1.9.2\n' + status + ' Скрытых блоков: ' + hidden.size));
     return;
   }
   const slots = [

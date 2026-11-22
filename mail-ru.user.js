@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mail.ru — убрать рекламу на главной
 // @namespace    local.mailru.cleanup
-// @version      1.9.2
+// @version      1.9.3
 // @description  Оставляет на главной Mail.ru почту, поиск и верхнее меню. Скрывает рекламные блоки веб-почты.
 // @match        https://mail.ru/*
 // @match        https://www.mail.ru/*
@@ -130,13 +130,17 @@
     // The app then removes its backdrop, focus trap and scroll lock together.
     const promoCloseAttempts = new Map();
     const promoText = el => el.textContent.replace(/\s+/gu,' ').trim();
+    const cloudCampaigns = [
+      {title:'Ого! Как выгодно!', offer:'Подключите 1 терабайт памяти в Облако', action:'Попробовать Облако'},
+      {title:'1 ТБ в Облаке на год по цене 3 месяцев', offer:'Успейте подключить подписку Mail Space', detail:'на год со скидкой', action:'Подключить со скидкой'}
+    ];
     function dismissCloudPromo() {
       const candidates = new Set();
       const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT, {
         acceptNode(el) {
           if (el.matches(protectedAreas + ',script,style,template,textarea,input,nav,header,form'))
             return NodeFilter.FILTER_REJECT;
-          return el.textContent.length < 100 && promoText(el) === 'Ого! Как выгодно!' ?
+          return el.textContent.length < 100 && cloudCampaigns.some(c => promoText(el) === c.title) ?
             NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
         }
       });
@@ -147,8 +151,9 @@
           if (box.width > Math.min(950,innerWidth) || box.height > innerHeight + 40) break;
           if (box.width < 250 || box.height < 150) continue;
           const text = promoText(panel);
-          if (!/Подключите 1 терабайт памяти в Облако/u.test(text) ||
-              !text.includes('Попробовать Облако') || !/Реклама\./u.test(text) || !/\berid\s*:/iu.test(text)) continue;
+          if (!cloudCampaigns.some(c => promoText(title) === c.title && text.includes(c.offer) &&
+              (!c.detail || text.includes(c.detail)) && text.includes(c.action)) ||
+              !/Реклама\./u.test(text) || !/\berid\s*:/iu.test(text)) continue;
           let modal = false;
           for (let parent = panel; parent && parent !== document.body; parent = parent.parentElement) {
             if (parent.matches('dialog[open],[role="dialog"],[aria-modal="true"]') ||
@@ -446,7 +451,7 @@
     new MutationObserver(scheduleHome).observe(document, {subtree:true,childList:true,attributes:true,attributeFilter:['class','id','slot','style','role','open']});
     scheduleHome();
     if (typeof GM_registerMenuCommand === 'function') GM_registerMenuCommand('Проверить очистку главной', () =>
-      window.alert('Mail.ru · версия 1.9.2\n' + status + ' Скрытых блоков: ' + hidden.size));
+      window.alert('Mail.ru · версия 1.9.3\n' + status + ' Скрытых блоков: ' + hidden.size));
     return;
   }
   const slots = [
